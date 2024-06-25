@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>WebRTC</title>
+	<style>
+		html,
+		body,
+		#app {
+			margin: 0px;
+			height: 100%;
+			width: 100%;
+		}
+
+		#app {
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+		}
+
+		#info {
+			width: 1294px;
+			display: flex;
+			flex: 1;
+			margin-bottom: 20px;
+			overflow: auto;
+		}
+
+		#user-list {
+			width: 300px;
+			flex-shrink: 0;
+			list-style: none;
+			padding: 10px;
+			margin: 0;
+			background-color: #f9f9f9;
+			border-radius: 10px;
+		}
+
+		#user-list li {
+			cursor: pointer;
+		}
+
+		#user-list li[selected] {
+			color: lightcoral;
+		}
+
+		#content {
+			height: 100%;
+			flex: 1;
+			display: flex;
+			flex-direction: column;
+		}
+
+		#local-video-container,
+		#remote-video-container {
+			display: flex;
+			flex-direction: column;
+		}
+		#local-video-container h2,
+		#remote-video-container h2 {
+			text-align: center;
+		}
+
+		#local-video-container {
+			margin-right: 10px;
+		}
+
+		#video {
+			display: flex;
+		}
+
+		video {
+			border-radius: 10px;
+			border: 1px solid black;
+		}
+
+		#log {
+			flex: 1;
+			display: flex;
+			flex-direction: column;
+		}
+		#log form {
+			flex-shrink: 0;
+			text-align: center;
+		}
+		#log form input {
+			height: 30px;
+			width: 400px;
+			font-size: 16px;
+		}
+		#log form button {
+			font-size: 16px;
+			height: 36px;
+			padding: 0 10px;
+		}
+
+		#msg {
+			flex: 1;
+			overflow: auto;
+			border-radius: 10px;
+			padding: 10px 100px;
+		}
+
+		*[remote-msg] {
+			text-align: end;
+		}
+	</style>
+</head>
+
+<body>
+	<div id="app">
+		<div id="video">
+			<div id="local-video-container">
+				<h2>Local</h2>
+				<video id="local-video" autoplay playsinline width="640px" height="480px"></video>
+			</div>
+			<div id="remote-video-container">
+				<h2>Remote</h2>
+				<video id="remote-video" autoplay playsinline width="640px" height="480px"></video>
+			</div>
+		</div>
+		<div id="info">
+			<ul id="user-list">
+			</ul>
+			<div id="log">
+				<div id="msg"></div>
+				<form>
+					<input id="my-msg" type="text" placeholder="Input message">
+					<button id="send">Send</button>
+				</form>
+			</div>
+		</div>
+	</div>
+	<script src="/socket.io/socket.io.js"></script>
+	<script type="module">
+		const socket = io();
+		let users // 当前用户列表, 使用socket id标识
+		let selfId
+		let remoteId // local and remote sockerId
+		let peerConnection
+		const userList = document.querySelector('#user-list')
+		const localVideo = document.getElementById('local-video')
+		const remoteVideo = document.getElementById('remote-video')
+		const msgInput = document.getElementById('my-msg')
+		const logDiv = document.getElementById('msg')
+		let activeLi
+		let dataChannel;
+
+		const config = {{ ICE_SERVERS }};
+		window.addEventListener('beforeunload', () => {
+			console.log('before unload')
+			socket.on('remove self', socket.id)
+		})
+
+		function appendMsg(msg, isOwn = false) {
+			logDiv.innerHTML += `<div ${isOwn ? '' : 'remote-msg'}>${new Date().toLocaleTimeString()} ${msg}</div>`
+			logDiv.scrollTo(0, logDiv.scrollHeight)
+		}
+
+		const sendBtn = document.getElementById('send')
+		sendBtn.addEventListener('click', (ev) => {
+			ev.preventDefault()
+			if (!dataChannel) {
+				alert('请确保dataChannel是open状态')
+				return
+			}
+			if (!msgInput.value) {
+				alert('请输入信息')
+				return
+			}
+			if (dataChannel && msgInput.value) {
+				dataChannel.send(msgInput.value)
+				appendMsg(msgInput.value, true)
+				msgInput.value = ''
+			}
+		})
+
+		socket.on('connect', () => {
+			selfId = socket.id
+			console.log(`Connected, self id: ${selfId}`)
+		})
+
+		function createDataChannel() {
+			dataChannel = peerConnection.createDataChannel('chat');
+			dataChannel.onopen = () => console.log('Data channel is open');
+			dataChannel.onmessage = (event) => appendMsg(event.data);
+			dataChannel.onerror = (event) => console.error('dataChannel发生错误', event)
+		}
+
+		navigator.mediaDevices.getUserMedia({ video: true })
+			.then((stream) => {
+				localVideo.srcObject = stream;
+			})
+			.catch((error) => {
+				console.error('Error accessing media devices.', error);
+			});
+
+		function createPeerConnection() {
+			peerConnection = new RTCPeerConnection(config);
+
+			// Handle ICE candidates
+			peerConnection.onicecandidate = (event) => {
+				const remoteId = event.target.remoteId
+				console.log(`on candidate: ${remoteId}, ${event.candidate}`)
+				console.log('oniceCandidate ', event.candidate)
+				if (event.candidate) {
+					socket.emit('send candidate', { id: remoteId, candidate: event.candidate });
+				}
+			};
+
+			// Handle remote video stream
+			peerConnection.ontrack = (event) => {
+				console.log('ontrack ', event)
+				remoteVideo.srcObject = event.streams[0];
+			};
+
+			peerConnection.onconnectionstatechange = function (event) {
+				console.log("RTC Connection State Change :", peerConnection.connectionState);
+				if (peerConnection.connectionState === 'connected') {
+					// 标记当前remoteId为红色
+					if (activeLi) {
+						activeLi.removeAttribute('selected')
+					}
+					const currentLi = document.querySelector(`li[data-id="${remoteId}"]`)
+					if (currentLi)
+						currentLi.setAttribute('selected', '')
+				}
+				if (['disconnected', 'failed', 'closed'].includes(peerConnection.connectionState)) {
+					closePeerConnection()
+				}
+			};
+
+			// When receiving an offer or answer, also set up the data channel
+			peerConnection.ondatachannel = (event) => {
+				console.log(`ondatachannel触发, ${event}`)
+				dataChannel = event.channel;
+				dataChannel.onmessage = (event) => appendMsg(event.data);
+				dataChannel.onerror = (event) => console.error('dataChannel发生错误', event)
+			};
+
+			// Add local stream to peer connection
+			const localStream = localVideo.srcObject;
+			for (const track of localStream.getTracks()) {
+				peerConnection.addTrack(track, localStream);
+			}
+		}
+
+		socket.on('receive offer', async (payload) => {
+			remoteId = payload.id // 被动接受方，这个id经过server端指定
+			if (!peerConnection) {
+				createPeerConnection();
+			}
+
+			await peerConnection.setRemoteDescription(payload.offer);
+			const answer = await peerConnection.createAnswer();
+			await peerConnection.setLocalDescription(answer);
+
+			socket.emit('send answer', { id: remoteId, answer });
+		});
+
+		socket.on('receive answer', async (payload) => {
+			try {
+				await peerConnection.setRemoteDescription(payload.answer);
+			} catch (error) {
+				console.error('Error set remote description', error);
+			}
+		});
+
+		socket.on('receive candidate', async (payload) => {
+			console.log('receive candidate', payload)
+			try {
+				await peerConnection.addIceCandidate(payload.candidate);
+			} catch (error) {
+				console.error('Error adding received ice candidate', error);
+			}
+		});
+
+		function closePeerConnection() {
+			if (peerConnection) {
+				console.log('关闭peerConnection')
+				remoteVideo.srcObject = null
+				peerConnection.close()
+				peerConnection = null
+				if (remoteId) {
+					const activeLi = document.querySelector(`li[data-id="${remoteId}"]`)
+					if (activeLi)
+						activeLi.removeAttribute('selected')
+					remoteId = ''
+				}
+				logDiv.innerHTML = ''
+			}
+		}
+
+		socket.on('update user list', (data) => {
+			console.log('update user list', data)
+			users = data.users
+			userList.innerHTML = ''
+			users.filter(user => user !== selfId).map((user) => {
+				const userLi = document.createElement('li')
+				userLi.setAttribute('data-id', user)
+				userLi.ondblclick = async (ev) => {
+					if (activeLi) {
+						activeLi.removeAttribute('selected')
+					}
+					userLi.setAttribute('selected', '')
+					activeLi = userLi
+
+					closePeerConnection()
+
+					remoteId = user
+
+					createPeerConnection()
+
+					peerConnection.remoteId = remoteId
+
+					createDataChannel()
+					const offer = await peerConnection.createOffer({
+						offerToReceiveVideo: 1,
+						// 已过时，最好用RTCRtpTransceiver替代
+					});
+					await peerConnection.setLocalDescription(offer)
+					// 设置自己的Description
+					// 发送websocket到信令服务器
+					socket.emit("send offer", { id: remoteId, offer });
+				}
+				userLi.textContent = user
+				userList.appendChild(userLi)
+			})
+		})
+	</script>
+</body>
+
+</html>
